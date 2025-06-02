@@ -1,0 +1,100 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - develop
+
+env:
+  AWS_REGION: sa-east-1
+
+jobs:
+  validate-plan:
+    name: Terraform Validate Plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Criar arquivo terraform.tfvars
+        working-directory: infra
+        run: |
+          mkdir -p vars
+          cat <<EOF > vars/terraform.tfvars
+          aws_region       = "sa-east-1"
+          vpc_id           = "vpc-02231b75f9df6c69a"
+          subnet_ids       = ["subnet-0cca69f5c89da43cf", "subnet-0913ad84d70244a1a", "subnet-084d5c7ee54058c03"]
+
+          ecs_cluster_name = "ecs-cluster"
+          alb_name         = "ecs-alb"
+
+          app_name           = "jwt-validator"
+          app_image          = "docker.io/kailima/jwt-validator:latest"
+          app_container_port = 8080
+
+          dd_api_key = "${{ secrets.DD_API_KEY }}"
+          dd_app_key = "${{ secrets.DD_APP_KEY }}"
+          EOF
+
+      - name: Ler arquivo destroy.yml
+        id: destroy_flag
+        run: |
+          VALUE=$(grep 'destroy:' destroy.yml | cut -d ':' -f2 | xargs)
+          echo "destroy=$VALUE" >> $GITHUB_OUTPUT
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init
+
+      - name: Terraform Validate
+        working-directory: infra
+        run: terraform validate
+      
+      - name: Terraform Plan ou Destroy
+        working-directory: infra
+        run: |
+          if [[ "${{ steps.destroy_flag.outputs.destroy }}" == "true" ]]; then
+            echo "Executando Terraform Destroy..."
+            terraform plan -var-file=vars/terraform.tfvars -destroy
+          else
+            echo "Executando Terraform Plan..."
+            terraform plan -var-file=vars/terraform.tfvars
+          fi
+
+
+  scan:
+    needs: validate-plan
+    name: Security Scan with Checkov
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Checkov GitHub Action
+        uses: bridgecrewio/checkov-action@v12
+        continue-on-error: true
+        with:
+          output_format: cli,sarif
+          output_file_path: console,results.sarif
+        
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v2
+        if: success() || failure()
+        with:
+          sarif_file: results.sarif
