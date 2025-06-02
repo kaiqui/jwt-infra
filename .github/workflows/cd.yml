@@ -1,0 +1,65 @@
+name: Terraform Apply PR Master
+
+on:
+  pull_request:
+    branches:
+      - master
+
+env:
+  AWS_REGION: sa-east-1
+
+jobs:
+  terraform-apply:
+    name: Terraform Apply or Destroy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Criar arquivo terraform.tfvars
+        working-directory: infra
+        run: |
+          cat <<EOF > vars/terraform.tfvars
+          aws_region       = "sa-east-1"
+          vpc_id           = "vpc-02231b75f9df6c69a"
+          subnet_ids       = ["subnet-0cca69f5c89da43cf", "subnet-0913ad84d70244a1a", "subnet-084d5c7ee54058c03"]
+
+          ecs_cluster_name = "ecs-cluster"
+          alb_name         = "ecs-alb"
+
+          app_name           = "jwt-validator"
+          app_image          = "docker.io/kailima/jwt-validator:latest"
+          app_container_port = 8080
+
+          dd_api_key = "${{ secrets.DD_API_KEY }}"
+          dd_app_key = "${{ secrets.DD_APP_KEY }}"
+          EOF
+
+      - name: Ler arquivo destroy.yml
+        id: destroy_flag
+        run: |
+          VALUE=$(grep 'destroy:' destroy.yml | cut -d ':' -f2 | xargs)
+          echo "destroy=$VALUE" >> $GITHUB_OUTPUT
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init
+
+      - name: Terraform Apply ou Destroy
+        working-directory: infra
+        run: |
+          if [[ "${{ steps.destroy_flag.outputs.destroy }}" == "true" ]]; then
+            echo "Executando Terraform Destroy..."
+            terraform destroy -var-file=vars/terraform.tfvars -auto-approve
+          else
+            echo "Executando Terraform Apply..."
+            terraform apply -var-file=vars/terraform.tfvars -auto-approve
+          fi
