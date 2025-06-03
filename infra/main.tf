@@ -249,7 +249,7 @@ resource "aws_lb_target_group" "blue" {
 }
 
 ################################
-# 6) Listener do ALB com regras de Blue/Green (peso 90/10)
+# 6) Listener do ALB
 ################################
 
 resource "aws_lb_listener" "http" {
@@ -258,21 +258,8 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
-    type = "forward"
-    forward {
-      target_group {
-        arn    = aws_lb_target_group.green.arn
-        weight = 90
-      }
-      target_group {
-        arn    = aws_lb_target_group.blue.arn
-        weight = 10
-      }
-      stickiness {
-        enabled  = false
-        duration = 1
-      }
-    }
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.blue.arn
   }
 }
 
@@ -286,6 +273,7 @@ resource "aws_cloudwatch_log_group" "app" {
 
   tags = var.tags
 }
+
 resource "aws_cloudwatch_log_group" "datadog_agent" {
   name              = "/ecs/datadog-agent"
   retention_in_days = 1
@@ -365,19 +353,21 @@ resource "aws_ecs_task_definition" "app_with_datadog" {
   tags = var.tags
 }
 
-
-
-
 ################################
-# 8) ECS Services (Green e Blue)
+# 8) ECS Service (Único com CodeDeploy)
 ################################
 
-resource "aws_ecs_service" "app_green" {
-  name            = "${var.app_name}-green"
+resource "aws_ecs_service" "app" {
+  name            = var.app_name
   cluster         = aws_ecs_cluster.this.id
   task_definition = aws_ecs_task_definition.app_with_datadog.arn
   desired_count   = 2
   launch_type     = "FARGATE"
+
+  # Configuração crítica para o CodeDeploy
+  deployment_controller {
+    type = "CODE_DEPLOY"
+  }
 
   network_configuration {
     subnets          = var.subnet_ids
@@ -385,14 +375,12 @@ resource "aws_ecs_service" "app_green" {
     security_groups  = [aws_security_group.ecs_tasks_sg.id]
   }
 
+  # Configuração inicial do load balancer (usando o target group blue)
   load_balancer {
-    target_group_arn = aws_lb_target_group.green.arn
+    target_group_arn = aws_lb_target_group.blue.arn
     container_name   = var.app_name
     container_port   = var.app_container_port
   }
-
-  deployment_minimum_healthy_percent = 50
-  deployment_maximum_percent         = 200
 
   tags = var.tags
 
@@ -401,31 +389,61 @@ resource "aws_ecs_service" "app_green" {
   ]
 }
 
-resource "aws_ecs_service" "app_blue" {
-  name            = "${var.app_name}-blue"
-  cluster         = aws_ecs_cluster.this.id
-  task_definition = aws_ecs_task_definition.app_with_datadog.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
+################################
+# 9) CodeDeploy App e Deployment Group
+################################
 
-  network_configuration {
-    subnets          = var.subnet_ids
-    assign_public_ip = true
-    security_groups  = [aws_security_group.ecs_tasks_sg.id]
+resource "aws_codedeploy_app" "this" {
+  compute_platform = "ECS"
+  name             = "${var.app_name}-codedeploy-app"
+}
+
+resource "aws_codedeploy_deployment_group" "this" {
+  app_name               = aws_codedeploy_app.this.name
+  deployment_group_name  = "${var.app_name}-deployment-group"
+  service_role_arn       = aws_iam_role.codedeploy_service_role.arn
+
+  deployment_config_name = "CodeDeployDefault.ECSCanary10Percent5Minutes"
+
+  auto_rollback_configuration {
+    enabled = true
+    events  = ["DEPLOYMENT_FAILURE"]
   }
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.blue.arn
-    container_name   = var.app_name
-    container_port   = var.app_container_port
+  blue_green_deployment_config {
+    deployment_ready_option {
+      action_on_timeout = "CONTINUE_DEPLOYMENT"
+    }
+
+    terminate_blue_instances_on_deployment_success {
+      action                           = "TERMINATE"
+      termination_wait_time_in_minutes = 5
+    }
   }
 
-  deployment_minimum_healthy_percent = 50
-  deployment_maximum_percent         = 200
+  deployment_style {
+    deployment_option = "WITH_TRAFFIC_CONTROL"
+    deployment_type   = "BLUE_GREEN"
+  }
 
-  tags = var.tags
+  ecs_service {
+    cluster_name = aws_ecs_cluster.this.name
+    service_name = aws_ecs_service.app.name
+  }
 
-  depends_on = [
-    aws_lb_listener.http
-  ]
+  load_balancer_info {
+    target_group_pair_info {
+      prod_traffic_route {
+        listener_arns = [aws_lb_listener.http.arn]
+      }
+
+      target_group {
+        name = aws_lb_target_group.blue.name
+      }
+
+      target_group {
+        name = aws_lb_target_group.green.name
+      }
+    }
+  }
 }
