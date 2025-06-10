@@ -21,7 +21,7 @@ infra/
 A infraestrutura provisionada inclui:
 
 1. **AWS como provedor de nuvem**
-2. **Recursos para autenticação JWT** (possivelmente incluindo Lambda functions, API Gateway, DynamoDB, etc.)
+2. **Recursos para o serviço JWT - Validator** (ECS, ALB)
 3. **Configuração de rede básica** (VPC, subnets, security groups)
 
 ## Pré-requisitos
